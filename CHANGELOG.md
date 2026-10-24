@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-10-24
+
+### Fixed
+
+- The settings page crashed on first render with
+  `template.replace is not a function`. Five dictionary entries
+  (`connected`, `toolsPartial`, `checkedAt`, `endpointHelp`, `endpointInUse`)
+  were formatter functions, but the harness locale runtime resolves templates
+  as plain strings with `{name}` placeholders substituted from a params
+  object. All five are now placeholder strings in both English and Chinese,
+  and their call sites pass params objects.
+- Regression tests: every dictionary value must be a plain non-empty string
+  (the previous test explicitly allowed functions, which is how this shipped),
+  and `{placeholder}` names must match between English and Chinese.
+
 ## [0.1.1] - 2026-10-24
 
 ### Fixed

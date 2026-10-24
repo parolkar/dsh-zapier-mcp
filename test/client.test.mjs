@@ -339,14 +339,34 @@ test('dictionaries cover the same keys in both languages', () => {
 	const enKeys = Object.keys(en).sort();
 	const zhKeys = Object.keys(zh).sort();
 	assert.deepEqual(zhKeys, enKeys);
-	for (const key of enKeys) {
-		const value = en[key];
-		const isUsable =
-			(typeof value === 'string' && value.trim() !== '') ||
-			typeof value === 'function';
-		assert.ok(isUsable, `en.${key} must be a non-empty string or function`);
-		const other = zh[key];
-		assert.equal(typeof other, typeof value, `zh.${key} type mismatch`);
+});
+
+// The harness locale runtime resolves templates to strings and substitutes
+// `{name}` placeholders from a params object; a non-string value (for example
+// a formatter function) reaches `template.replace` and crashes the page.
+test('every dictionary value is a plain string (locale runtime contract)', () => {
+	for (const [locale, dict] of [['en', en], ['zh', zh]]) {
+		for (const [key, value] of Object.entries(dict)) {
+			assert.equal(
+				typeof value,
+				'string',
+				`${locale}.${key} must be a string, not ${typeof value}`,
+			);
+			assert.ok(value.trim() !== '', `${locale}.${key} must be non-empty`);
+		}
+	}
+});
+
+test('parameterized placeholders match between en and zh', () => {
+	const placeholder = /\{(\w+)\}/g;
+	for (const key of Object.keys(en)) {
+		const names = (src) =>
+			[...String(src).matchAll(placeholder)].map((m) => m[1]).sort().join(',');
+		assert.equal(
+			names(en[key]),
+			names(zh[key]),
+			`zh.${key} placeholders must match en.${key}`,
+		);
 	}
 });
 
@@ -470,8 +490,8 @@ test('statusTone maps each status and unknown values', () => {
 });
 
 test('formatStatusText reports every state', () => {
-	const t = (key, ...args) => {
-		if (key === 'connected') return `connected:${args[0]}`;
+	const t = (key, params) => {
+		if (key === 'connected') return `connected:${params.count}`;
 		return key;
 	};
 	const ok = readSnapshot(connectedDocument());

@@ -71,14 +71,13 @@ window.__ModuleLoader__.load({
 			removing: 'Removing\u2026',
 			notConfigured: 'Not configured',
 			checking: 'Checking token\u2026',
-			connected: (count) => `Connected \u2014 ${count} tools available`,
+			connected: 'Connected \u2014 {count} tools available',
 			rejected: 'Token rejected',
 			readFailed: 'Could not read status',
 			readFailedHelp:
 				'The settings service did not answer. You can still save a token; retry in a moment.',
-			toolsPartial: (shown, total) =>
-				`Showing ${shown} of ${total} tools.`,
-			checkedAt: (when) => `Last checked ${when}`,
+			toolsPartial: 'Showing {shown} of {total} tools.',
+			checkedAt: 'Last checked {when}',
 			emptyToken: 'Enter a token first.',
 			saveFailed: 'Could not save the token.',
 			removeFailed: 'Could not remove the token.',
@@ -87,12 +86,12 @@ window.__ModuleLoader__.load({
 				'Still checking \u2014 the result will appear here when it finishes.',
 			advanced: 'Advanced',
 			endpointLabel: 'MCP endpoint override',
-			endpointHelp: (url) => `Leave empty to use the Zapier default ${url}.`,
+			endpointHelp: 'Leave empty to use the Zapier default {url}.',
 			endpointSave: 'Save endpoint',
 			endpointSaving: 'Saving\u2026',
 			endpointSaved: 'Endpoint update requested.',
 			endpointFailed: 'Could not save the endpoint.',
-			endpointInUse: (url) => `In use: ${url}`,
+			endpointInUse: 'In use: {url}',
 		};
 
 		/** @type {Record<string, any>} */
@@ -114,12 +113,12 @@ window.__ModuleLoader__.load({
 			removing: '正在移除\u2026',
 			notConfigured: '未配置',
 			checking: '正在检查令牌\u2026',
-			connected: (count) => `已连接 \u2014 可用工具 ${count} 个`,
+			connected: '已连接 \u2014 可用工具 {count} 个',
 			rejected: '令牌被拒绝',
 			readFailed: '无法读取状态',
 			readFailedHelp: '设置服务未响应。仍可保存令牌，请稍后重试。',
-			toolsPartial: (shown, total) => `已列出 ${shown} / ${total} 个工具。`,
-			checkedAt: (when) => `上次检查 ${when}`,
+			toolsPartial: '已列出 {shown} / {total} 个工具。',
+			checkedAt: '上次检查 {when}',
 			emptyToken: '请先输入令牌。',
 			saveFailed: '无法保存令牌。',
 			removeFailed: '无法移除令牌。',
@@ -127,12 +126,12 @@ window.__ModuleLoader__.load({
 			pollTimeout: '仍在检查 \u2014 完成后结果会显示在此处。',
 			advanced: '高级',
 			endpointLabel: 'MCP 端点覆盖',
-			endpointHelp: (url) => `留空则使用 Zapier 默认值 ${url}。`,
+			endpointHelp: '留空则使用 Zapier 默认值 {url}。',
 			endpointSave: '保存端点',
 			endpointSaving: '正在保存\u2026',
 			endpointSaved: '已请求更新端点。',
 			endpointFailed: '无法保存端点。',
-			endpointInUse: (url) => `当前使用：${url}`,
+			endpointInUse: '当前使用：{url}',
 		};
 
 		/* ------------------------------------------------------------------ *
@@ -351,7 +350,7 @@ window.__ModuleLoader__.load({
 				case 'checking':
 					return t('checking');
 				case 'connected':
-					return t('connected', snapshot.toolCount);
+					return t('connected', { count: snapshot.toolCount });
 				case 'error':
 					return t('rejected');
 				case 'unconfigured':
@@ -1106,11 +1105,11 @@ window.__ModuleLoader__.load({
 					? h(
 							'span',
 							{ style: styles.meta },
-							t('toolsPartial', toolNames.length, snapshot.toolCount),
+							t('toolsPartial', { shown: toolNames.length, total: snapshot.toolCount }),
 						)
 					: null,
 				checkedAtText !== ''
-					? h('span', { style: styles.meta }, t('checkedAt', checkedAtText))
+					? h('span', { style: styles.meta }, t('checkedAt', { when: checkedAtText }))
 					: null,
 			);
 
@@ -1226,7 +1225,7 @@ window.__ModuleLoader__.load({
 						h(
 							'span',
 							{ style: styles.help },
-							t('endpointHelp', DEFAULT_ENDPOINT),
+							t('endpointHelp', { url: DEFAULT_ENDPOINT }),
 						),
 					),
 					h(
@@ -1248,7 +1247,7 @@ window.__ModuleLoader__.load({
 					h(
 						'span',
 						{ style: styles.meta },
-						t('endpointInUse', effectiveEndpoint),
+						t('endpointInUse', { url: effectiveEndpoint }),
 					),
 				),
 			);
