@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-10-24
+
+### Fixed
+
+- A crash while rendering the Zapier MCP settings page no longer reads as a
+  silently blank page. The slot host's own error boundary abdicates a crashed
+  section — the entry leaves the content projection while its navigation label
+  stays — so the page appeared empty with no way to see why. The page now
+  registers its own crash shield first: a rendering error is caught one level
+  down, the error message and the top stack lines are shown in the page itself
+  with a **Retry** button, and the original stack still reaches the browser
+  console. If the host React lacks class-component support the page degrades to
+  the previous unwrapped behaviour rather than failing to load.
+
 ## [0.1.0] - 2026-10-24
 
 ### Added

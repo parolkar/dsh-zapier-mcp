@@ -30,6 +30,7 @@ window.__ModuleLoader__.load({
 		const useMemo = React.useMemo;
 		const useRef = React.useRef;
 		const useCallback = React.useCallback;
+		const Component = React.Component;
 
 		/** Settings namespace this plugin owns. */
 		const NS = 'zapier-mcp';
@@ -1265,6 +1266,78 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/**
+		 * Crash shield for the Settings page.
+		 *
+		 * The slot host's own boundary abdicates a crashed section: the entry
+		 * leaves the content projection while its nav label stays, which reads
+		 * as a silently blank page. This boundary intercepts the throw one level
+		 * down and renders the error text in the DOM instead — a crash is then
+		 * visible, reportable, and recoverable without a page reload.
+		 */
+		const SectionBoundary =
+			typeof Component === 'function'
+				? class extends Component {
+			constructor(props) {
+				super(props);
+				this.state = { error: null };
+			}
+
+			/** @returns {object} next state carrying the caught error. */
+			static getDerivedStateFromError(error) {
+				return { error: error instanceof Error ? error : new Error(String(error)) };
+			}
+
+			/**
+			 * Mirror the crash to the console so the browser DevTools keep the
+			 * original stack.
+			 * @param {Error} error - the thrown error.
+			 * @returns {void}
+			 */
+			componentDidCatch(error) {
+				if (typeof console !== 'undefined' && typeof console.error === 'function') {
+					console.error('[dsh-zapier-mcp] settings page crashed:', error);
+				}
+			}
+
+			/** @returns {any} the page again, or the visible crash banner. */
+			render() {
+				if (this.state.error === null) {
+					return h(ZapierSection, this.props);
+				}
+				const message = this.state.error.message || String(this.state.error);
+				const stack = typeof this.state.error.stack === 'string' ? this.state.error.stack.split('\n').slice(1, 4).join('\n') : '';
+				return h(
+					'div',
+					{ style: styles.root, 'data-zapier-mcp-error': '' },
+					h(
+						'p',
+						{ style: styles.error, role: 'alert' },
+						'dsh-zapier-mcp: the Zapier MCP settings page crashed while rendering.',
+					),
+					h('pre', {
+						style: {
+							...styles.toolList,
+							whiteSpace: 'pre-wrap',
+							userSelect: 'text',
+						},
+					}, message + (stack !== '' ? `\n${stack}` : '')),
+					h(
+						'button',
+						{
+							type: 'button',
+							style: styles.buttonPrimary,
+							onClick: () => this.setState({ error: null }),
+						},
+						'Retry',
+					),
+				);
+			}
+				}
+				// A host React without Component (never seen in practice) still
+				// gets a working page — just without the crash shield.
+				: ZapierSection;
+
 		/** Services this bundle needs before `apply` runs. */
 		const inject = [
 			'slots',
@@ -1296,7 +1369,7 @@ window.__ModuleLoader__.load({
 						label: () => t('nav'),
 						inject: () => ({ t, client }),
 					},
-					ZapierSection,
+					SectionBoundary,
 				),
 			);
 		}
@@ -1316,6 +1389,7 @@ window.__ModuleLoader__.load({
 				en,
 				zh,
 				ZapierSection,
+				SectionBoundary,
 				createClient,
 				interpretEnvelope,
 				readSnapshot,
