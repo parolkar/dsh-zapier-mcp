@@ -21,6 +21,15 @@ import {
   isRecheckTrigger,
   selectServerTools,
 } from './lib/host-logic.js';
+import {
+  INVENTORY_LIMIT,
+  ZAPIER_INSPECT_TOOL,
+  ZAPIER_SECTION_NAME,
+  buildInventoryDigest,
+  buildZapierPromptSection,
+  sectionOrderFor,
+  shouldRegisterPromptSection,
+} from './lib/prompt.js';
 
 /** Cordis plugin name used by Loader diagnostics. */
 export const name = 'zapier-mcp';
@@ -45,6 +54,13 @@ export const Config = z.object({
   endpoint: z.string().default(DEFAULT_ENDPOINT),
   credentialRef: z.string().default('ZAPIER_MCP_TOKEN'),
   toolCallTimeoutMs: z.number().default(60000),
+  // Zapier's server instructions are large; the default cap is deliberately
+  // generous, and the manager retries once with instructionRetryBytes when a
+  // server still exceeds it (rather than reporting a valid token as broken).
+  maxInstructionBytes: z.number().default(131072),
+  instructionRetryBytes: z.number().default(1048576),
+  // Whether the curated Zapier section is contributed to the system prompt.
+  systemPrompt: z.boolean().default(true),
   // Advanced: alternate/self-hosted MCP endpoint. Volatile so an edit applies
   // to the next attempt without reloading the plugin; read per attempt below.
   endpointOverride: z.string().default('').volatile(),
@@ -54,6 +70,8 @@ export const Config = z.object({
   toolNames: z.array(z.string()).max(TOOL_NAME_LIMIT).default([]).volatile(),
   lastError: z.string().default('').volatile(),
   checkedAt: z.string().default('').volatile(),
+  // Digest of the live enabled apps; bounded, and never carries account ids.
+  inventory: z.string().max(INVENTORY_LIMIT).default('').volatile(),
   // Bumped by the Settings page to ask for a re-check.
   checkNonce: z.number().default(0).volatile(),
 });
@@ -81,6 +99,17 @@ function readString(value, fallback) {
 }
 
 /**
+ * Read a finite numeric config field with its default.
+ * @param {unknown} value - raw config entry.
+ * @param {number} fallback - default when absent or not a finite number.
+ * @returns {number} the configured number.
+ */
+function readNumber(value, fallback) {
+  const raw = readPlain(value, fallback);
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : fallback;
+}
+
+/**
  * Activate the Host half.
  *
  * Explicitly `async`: Cordis treats a prototype-bearing ordinary function as a
@@ -98,9 +127,30 @@ export async function apply(ctx, config) {
     const endpoint = readString(config.endpoint, DEFAULT_ENDPOINT);
     const credentialRef = readString(config.credentialRef, 'ZAPIER_MCP_TOKEN');
     const toolCallTimeoutMs = readPlain(config.toolCallTimeoutMs, 60000);
-    // Profile entry id is the namespace the Settings service knows; without a
-    // Loader entry (tests, programmatic mounts) fall back to the plugin name.
-    const ns = ctx.fiber.entry?.id ?? name;
+    const maxInstructionBytes = readNumber(config.maxInstructionBytes, 131072);
+    const instructionRetryBytes = readNumber(config.instructionRetryBytes, 1048576);
+    // The Settings service addresses a form by the entry's PROFILE PATCH id
+    // (`entry.options.id`), never by the Loader tree-local id (`entry.id`,
+    // which carries the parent include prefix and matches no profile row).
+    // Without a Loader entry (tests, programmatic mounts) fall back to the name.
+    const ns = ctx.fiber.entry?.options?.id ?? name;
+
+    /**
+     * Latest published status, read by the prompt section on every assembly.
+     * Kept here (rather than in the manager) so the section is a pure read of
+     * the same facts the Settings page shows.
+     */
+    let live = {
+      status: 'unconfigured',
+      toolCount: 0,
+      toolNames: [],
+      lastError: '',
+      checkedAt: '',
+      inventory: '',
+    };
+
+    /** Monotonic id for synthetic inventory calls; never an agent/product call. */
+    let inventoryCalls = 0;
 
     /** The child fiber currently owning the MCP connection, if any. */
     let childFiber;
@@ -155,6 +205,42 @@ export async function apply(ctx, config) {
       return selectServerTools(schemas.map((schema) => schema.name), serverName);
     };
 
+    /** Public name of Zapier's inventory meta-tool, as registered by mcp-client. */
+    const inventoryToolName = `mcp__${serverName}__${ZAPIER_INSPECT_TOOL}`;
+
+    /**
+     * Read the live enabled-app inventory through Zapier's own meta-tool.
+     *
+     * The DSH tool pipeline is used deliberately: this call is agent-less, and
+     * `ToolRuntime` proves an agent-less execution can never raise an approval
+     * prompt — a pre-dispatch `ask` degrades to a denial ("requires approval,
+     * but the call has no agent to route it through") before the approval seam
+     * is consulted. Nothing here is attributed to an agent.
+     *
+     * Every failure mode — tool absent (e.g. PTC-only presentation), denied,
+     * timed out, malformed payload — degrades to no inventory and never fails
+     * the connection.
+     * @returns {Promise<string>} the bounded digest, or '' when unavailable.
+     */
+    const collectInventory = async () => {
+      const tools = ctx.get('tools');
+      if (!tools || typeof tools.execute !== 'function') return '';
+      if (!listTools().includes(inventoryToolName)) return '';
+      try {
+        const result = await tools.execute({
+          callId: `zapier-mcp:inventory:${(inventoryCalls += 1)}`,
+          name: inventoryToolName,
+          arguments: {},
+          signal: AbortSignal.timeout(toolCallTimeoutMs),
+        });
+        if (!result || result.isError === true) return '';
+        return buildInventoryDigest(result.value);
+      } catch {
+        // A denial, a missing tool, an abort or an unusable payload: no inventory.
+        return '';
+      }
+    };
+
     /**
      * Publish the volatile status fields through the Settings service. The
      * service is optional and a publish must never break connection logic, so
@@ -162,6 +248,7 @@ export async function apply(ctx, config) {
      * @param {object} patch - complete volatile status patch.
      */
     const publish = async (patch) => {
+      live = { ...live, ...patch };
       try {
         const settings = ctx.get('settings');
         if (!settings) return;
@@ -177,9 +264,10 @@ export async function apply(ctx, config) {
      * (with the real cause) instead of leaving a silent no-op behind.
      * @param {string} token - resolved token for this attempt.
      * @param {string} effectiveEndpoint - endpoint chosen for this attempt.
+     * @param {number} instructionBytes - server-instructions cap for this attempt.
      * @returns {Promise<Function>} disposer that disconnects and unregisters the tools.
      */
-    const mount = async (token, effectiveEndpoint) => {
+    const mount = async (token, effectiveEndpoint, instructionBytes) => {
       const mcp = await loadMcpClient();
       const fiber = ctx.plugin(
         { name: mcp.name, inject: mcp.inject, Config: mcp.Config, apply: mcp.apply },
@@ -188,6 +276,7 @@ export async function apply(ctx, config) {
           transport: 'streamable-http',
           url: buildServerUrl(effectiveEndpoint, token),
           toolCallTimeoutMs,
+          maxInstructionBytes: instructionBytes,
           failOnStartupError: true,
           reconnect: { enabled: true },
         },
@@ -208,7 +297,10 @@ export async function apply(ctx, config) {
       mount,
       unmount,
       listTools,
+      collectInventory,
       publish,
+      maxInstructionBytes,
+      instructionRetryBytes,
     });
 
     // This bundle ships its own Settings page, so disable the auto-generated
@@ -233,6 +325,28 @@ export async function apply(ctx, config) {
     });
 
     ctx.effect(() => () => manager.dispose());
+
+    // Curated Zapier intelligence for every session. The text provider is
+    // evaluated per assembly against `live`, so it appears only while the
+    // connection is up and disappears the moment it drops. `interpolate: false`
+    // keeps any `$` sequence literal.
+    if (shouldRegisterPromptSection({ systemPrompt: readPlain(config.systemPrompt, true) })) {
+      ctx.inject(['systemPrompt'], (child) => {
+        child.effect(() =>
+          child.systemPrompt.section({
+            name: ZAPIER_SECTION_NAME,
+            order: sectionOrderFor(child.systemPrompt),
+            interpolate: false,
+            text: () =>
+              buildZapierPromptSection({
+                status: live.status,
+                serverName,
+                inventory: live.inventory,
+              }),
+          }),
+        );
+      });
+    }
 
     // The first probe runs in the background on purpose: an unreachable or hung
     // endpoint must never block Harness boot. Tools register as soon as the

@@ -23,32 +23,56 @@
 
 import { createServer } from 'node:http';
 
-/** Tools this fake server advertises, shaped like real MCP tool definitions. */
-export const DEFAULT_TOOLS = [
-  {
-    name: 'send_email',
-    description: 'Send an email through a connected Zapier app (fake).',
-    inputSchema: {
-      type: 'object',
-      properties: { to: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' } },
-      required: ['to'],
-    },
-  },
-  {
-    name: 'create_spreadsheet_row',
-    description: 'Append a row to a connected spreadsheet (fake).',
-    inputSchema: {
-      type: 'object',
-      properties: { spreadsheet: { type: 'string' }, values: { type: 'array', items: { type: 'string' } } },
-      required: ['spreadsheet'],
-    },
-  },
-  {
-    name: 'find_contact',
-    description: 'Look up a contact in a connected CRM (fake).',
-    inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
-  },
+/**
+ * The ~16 fixed meta-tools a real Zapier MCP server advertises, whatever apps
+ * are connected. The per-app capability surface is virtual and only reachable
+ * through them, so a fake server must speak this shape to be representative.
+ */
+export const ZAPIER_META_TOOL_NAMES = [
+  'discover_zapier_actions',
+  'enable_zapier_action',
+  'disable_zapier_action',
+  'inspect_zapier_actions',
+  'execute_zapier_read_action',
+  'execute_zapier_write_action',
+  'list_zapier_connections',
+  'manage_zapier_connections',
+  'auto_provision_mcp',
+  'write_code_action',
+  'list_zapier_skills',
+  'get_zapier_skill',
+  'create_zapier_skill',
+  'update_zapier_skill',
+  'delete_zapier_skill',
+  'send_feedback',
+  'get_configuration_url',
 ];
+
+/** Tools this fake server advertises, shaped like real MCP tool definitions. */
+export const DEFAULT_TOOLS = ZAPIER_META_TOOL_NAMES.map((name) => ({
+  name,
+  description: `Fake Zapier meta-tool \`${name}\`.`,
+  inputSchema: { type: 'object', properties: {} },
+}));
+
+/** What the fake `inspect_zapier_actions` reports: apps, actions and accounts. */
+export const DEFAULT_INVENTORY = {
+  apps: [
+    {
+      app: 'Gmail',
+      selected_api: 'GoogleMailV2CLIAPI',
+      action_count: 1,
+      connections: { total: 2, default: { id: 'conn-1', title: 'tester@example.com' } },
+    },
+    {
+      app: 'Trello',
+      selected_api: 'TrelloCLIAPI',
+      action_count: 3,
+      connections: { total: 1, default: { id: 'conn-2', title: 'team board' } },
+    },
+  ],
+};
+
 
 /** The exact body Zapier returns for an unusable token, minus HTTP framing. */
 export const INVALID_TOKEN_BODY = JSON.stringify({
@@ -80,7 +104,7 @@ function readJson(request) {
 }
 
 /** Answer one JSON-RPC message, or `undefined` for a notification. */
-function respond(message, tools) {
+function respond(message, tools, inventory) {
   if (message.method === 'initialize') {
     return {
       protocolVersion: typeof message.params?.protocolVersion === 'string' ? message.params.protocolVersion : '2025-06-18',
@@ -93,6 +117,14 @@ function respond(message, tools) {
   if (message.method === 'tools/call') {
     const name = message.params?.name;
     const args = message.params?.arguments ?? {};
+    // The one meta-tool whose payload the plugin digests for the prompt.
+    if (name === 'inspect_zapier_actions') {
+      return {
+        content: [{ type: 'text', text: JSON.stringify(inventory) }],
+        structuredContent: inventory,
+        isError: false,
+      };
+    }
     return {
       content: [{ type: 'text', text: `${name}(${JSON.stringify(args)}) via fake-zapier-mcp` }],
       isError: false,
@@ -112,6 +144,7 @@ function respond(message, tools) {
  */
 export async function startFakeZapierMcpServer(options = {}) {
   const tools = options.tools ?? DEFAULT_TOOLS;
+  const inventory = options.inventory ?? DEFAULT_INVENTORY;
   const log = options.logger ?? (() => {});
   const sessions = new Set();
 
@@ -162,7 +195,7 @@ export async function startFakeZapierMcpServer(options = {}) {
     const messages = Array.isArray(message) ? message : [message];
     const replies = [];
     for (const one of messages) {
-      const result = respond(one, tools);
+      const result = respond(one, tools, inventory);
       if (result !== undefined) replies.push({ jsonrpc: '2.0', id: one.id ?? null, result });
     }
 

@@ -14,6 +14,7 @@ import {
   buildServerUrl,
   createConnectionManager,
   describeError,
+  isInstructionLimitError,
   isRecheckTrigger,
   selectServerTools,
 } from '../lib/host-logic.js';
@@ -164,7 +165,7 @@ describe('createConnectionManager', () => {
 
     assert.equal(mounts, 0);
     assert.deepEqual(published, [
-      { status: 'unconfigured', toolCount: 0, toolNames: [], lastError: '', checkedAt: '2026-01-01T00:00:00.000Z' },
+      { status: 'unconfigured', toolCount: 0, toolNames: [], lastError: '', checkedAt: '2026-01-01T00:00:00.000Z', inventory: '' },
     ]);
     await manager.dispose();
   });
@@ -406,5 +407,151 @@ describe('createConnectionManager', () => {
 
     await manager.trigger('recheck');
     assert.equal(mounts, 1, 'a disposed manager must not remount');
+  });
+
+  it('publishes the collected inventory and clears it when disconnected', async () => {
+    const published = [];
+    let token = 'tok';
+    const manager = createConnectionManager({
+      resolveToken: () => token,
+      resolveEndpoint: () => '',
+      mount: async () => async () => {},
+      unmount: async () => {},
+      listTools: () => ['mcp__zapier__inspect_zapier_actions'],
+      collectInventory: () => 'Enabled now: Gmail — 1 action, 2 accounts',
+      publish: (patch) => published.push(patch),
+      now: () => 'now',
+    });
+
+    await manager.trigger('initial');
+    assert.equal(published.at(-1).status, 'connected');
+    assert.equal(published.at(-1).inventory, 'Enabled now: Gmail — 1 action, 2 accounts');
+
+    token = '';
+    await manager.trigger('credential');
+    assert.equal(published.at(-1).status, 'unconfigured');
+    assert.equal(published.at(-1).inventory, '');
+    await manager.dispose();
+  });
+
+  it('degrades to no inventory when collection throws or returns garbage', async () => {
+    const published = [];
+    const manager = createConnectionManager({
+      resolveToken: () => 'tok',
+      resolveEndpoint: () => '',
+      mount: async () => async () => {},
+      unmount: async () => {},
+      listTools: () => [],
+      collectInventory: () => {
+        throw new Error('inventory tool denied');
+      },
+      publish: (patch) => published.push(patch),
+      now: () => 'now',
+    });
+
+    await assert.doesNotReject(manager.trigger('initial'));
+    assert.equal(published.at(-1).status, 'connected');
+    assert.equal(published.at(-1).inventory, '');
+    assert.equal(published.at(-1).lastError, '');
+    await manager.dispose();
+  });
+
+  it('retries exactly once with the larger instruction cap, then succeeds', async () => {
+    const published = [];
+    const attempts = [];
+    const manager = createConnectionManager({
+      resolveToken: () => 'tok',
+      resolveEndpoint: () => 'https://host/connect',
+      mount: async (token, endpoint, instructionBytes) => {
+        attempts.push(instructionBytes);
+        if (attempts.length === 1) {
+          // The real shape: mcp-client wraps the oversized-instructions error in a cause.
+          throw new Error('mcp-client(zapier): initial connection or tool synchronization failed', {
+            cause: new Error('mcp-client(zapier): server instructions exceed maxInstructionBytes (131072)'),
+          });
+        }
+        return async () => {};
+      },
+      unmount: async () => {},
+      listTools: () => ['mcp__zapier__inspect_zapier_actions'],
+      collectInventory: () => '',
+      publish: (patch) => published.push(patch),
+      maxInstructionBytes: 131072,
+      instructionRetryBytes: 1048576,
+      now: () => 'now',
+    });
+
+    await manager.trigger('initial');
+
+    assert.deepEqual(attempts, [131072, 1048576]);
+    assert.deepEqual(published.map((patch) => patch.status), ['checking', 'connected']);
+    assert.equal(published.at(-1).lastError, '');
+    await manager.dispose();
+  });
+
+  it('reports the second failure when the retry also exceeds the cap', async () => {
+    const published = [];
+    const attempts = [];
+    const manager = createConnectionManager({
+      resolveToken: () => 'tok',
+      resolveEndpoint: () => '',
+      mount: async (_token, _endpoint, instructionBytes) => {
+        attempts.push(instructionBytes);
+        throw new Error(`server instructions exceed maxInstructionBytes (${instructionBytes}) - retry failed`);
+      },
+      unmount: async () => {},
+      listTools: () => [],
+      publish: (patch) => published.push(patch),
+      maxInstructionBytes: 131072,
+      instructionRetryBytes: 1048576,
+      now: () => 'now',
+    });
+
+    await assert.doesNotReject(manager.trigger('initial'));
+
+    assert.deepEqual(attempts, [131072, 1048576], 'exactly one retry');
+    assert.equal(published.at(-1).status, 'error');
+    assert.match(published.at(-1).lastError, /retry failed/);
+    await manager.dispose();
+  });
+
+  it('does not retry an unrelated mount failure', async () => {
+    const published = [];
+    let mounts = 0;
+    const manager = createConnectionManager({
+      resolveToken: () => 'tok',
+      resolveEndpoint: () => '',
+      mount: async () => {
+        mounts += 1;
+        throw new Error('Invalid OAuth token - please re-authenticate');
+      },
+      unmount: async () => {},
+      listTools: () => [],
+      publish: (patch) => published.push(patch),
+      maxInstructionBytes: 131072,
+      instructionRetryBytes: 1048576,
+      now: () => 'now',
+    });
+
+    await assert.doesNotReject(manager.trigger('initial'));
+
+    assert.equal(mounts, 1, 'only an instruction-cap failure may retry');
+    assert.equal(published.at(-1).lastError, 'Invalid OAuth token - please re-authenticate');
+    await manager.dispose();
+  });
+});
+
+describe('isInstructionLimitError', () => {
+  it('matches the message directly or through the cause chain', () => {
+    assert.equal(isInstructionLimitError(new Error('server instructions exceed maxInstructionBytes (32768)')), true);
+    assert.equal(
+      isInstructionLimitError(new Error('mcp-client(zapier): initial connection failed', {
+        cause: new Error('server instructions exceed maxInstructionBytes (131072)'),
+      })),
+      true,
+    );
+    assert.equal(isInstructionLimitError(new Error('Invalid OAuth token - please re-authenticate')), false);
+    assert.equal(isInstructionLimitError(undefined), false);
+    assert.equal(isInstructionLimitError('maxInstructionBytes'), false);
   });
 });
